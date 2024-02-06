@@ -55,12 +55,14 @@ calibration_path = 'C:/Users/Alessandro/Desktop/Neuro'
 if __name__ == '__main__':
 
     #calibration = hl2ss_lnm.download_calibration_rm_depth_longthrow(host, hl2ss.StreamPort.RM_DEPTH_LONGTHROW)
-
+    
+    # Compute the calibration paramteres from Holo 
     calibration = hl2ss_3dcv.get_calibration_rm(host, hl2ss.StreamPort.RM_DEPTH_LONGTHROW, calibration_path)
+    #compute the lookup table from pixel space to image space with depth=1
     uv2xy = hl2ss_3dcv.compute_uv2xy(calibration.intrinsics, hl2ss.Parameters_RM_DEPTH_LONGTHROW.WIDTH, hl2ss.Parameters_RM_DEPTH_LONGTHROW.HEIGHT)
     xy1, scale = hl2ss_3dcv.rm_depth_compute_rays(uv2xy, calibration.scale)
 
-    
+    #Initialize the stream
     producer = hl2ss_mp.producer()
     producer.configure(hl2ss.StreamPort.RM_DEPTH_LONGTHROW, hl2ss_lnm.rx_rm_depth_longthrow(host, hl2ss.StreamPort.RM_DEPTH_LONGTHROW))
     producer.initialize(hl2ss.StreamPort.RM_DEPTH_LONGTHROW, hl2ss.Parameters_RM_DEPTH_LONGTHROW.FPS * buffer_length)
@@ -82,7 +84,7 @@ if __name__ == '__main__':
     '''
 
 
-
+    #Function to compute 3D pos from pixel pos
     def Compute_3D_coord(keys,depth):
         key_3D = []
         
@@ -102,7 +104,8 @@ if __name__ == '__main__':
         print(key_3D)
         
         return key_3D
-
+    
+    #Function to perform DBSCAN clustering
     def clusterObjManich(pcd, epsValue):
         with o3d.utility.VerbosityContextManager(
                 o3d.utility.VerbosityLevel.Debug) as mm:
@@ -127,7 +130,7 @@ if __name__ == '__main__':
 
         return listCluster[clusterMaxind]
  
-
+    #Function to perform PCA initial registration
     def PCA_registration(points_U,points_Y):
         
         N_U = points_U.shape[1]
@@ -215,7 +218,8 @@ if __name__ == '__main__':
         T_k[2][-1] = t_k[result_index][2]
 
         return R_k[result_index], t_k[result_index], T_k
-
+    
+    #Function to remove hidden point from the pointcloud
     def hiddenPointRemoval(pcd):
         # Convert mesh to a point cloud and estimate dimensions.
         
@@ -242,156 +246,140 @@ if __name__ == '__main__':
         pcd_withoutHidden.paint_uniform_color([0, 0.706, 0])
         return pcd_withoutHidden
 
+    
+#This while is used if i want to enstablish a communication protocol between Holo and workstation. I comment this for the moment
+   #while True:
+   #    HOST = "192.168.0.100"
+   #    PORT = 1000
+
+   #    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+   #            server_socket.bind((HOST, PORT))
+   #            server_socket.listen()
+
+   #            print(f"Server listening on {HOST}:{PORT}")
 
     while True:
-        HOST = "192.168.0.100"
-        PORT = 1000
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
-                server_socket.bind((HOST, PORT))
-                server_socket.listen()
+        #client_socket, client_address = server_socket.accept()
+        #print(f"Accepted connection from {client_address}")
+        
+        #Get the last frame available
+        sink_depth.acquire()
+        _, data = sink_depth.get_most_recent_frame()
+        
+        #undistort and normalize the pointcloud
+        depth = hl2ss_3dcv.rm_depth_undistort(data.payload.depth, calibration.undistort_map)
+        depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
+        
+        
+        
+        o3d_depth_image = o3d.geometry.Image(depth)
+        
+        intrinsic = o3d.camera.PinholeCameraIntrinsic()
+        intrinsic.set_intrinsics(hl2ss.Parameters_RM_DEPTH_LONGTHROW.WIDTH, hl2ss.Parameters_RM_DEPTH_LONGTHROW.HEIGHT, calibration.intrinsics[0, 0], calibration.intrinsics[1, 1], calibration.intrinsics[2, 0], calibration.intrinsics[2, 1])
+        
+        # Create a point cloud from the depth image
+        point_cloud = o3d.geometry.PointCloud.create_from_depth_image(
+            o3d_depth_image,
+            intrinsic,
+            depth_scale=1.0,  # Adjust based on your specific depth values
+            #depth_trunc=0.5,  # Adjust based on your specific depth values
+        )
+        
+        #Here i am cropping the points that are outside the bounds that i define. I did this for the face pointcloud to remove the table but maybe here it is not necessary
+        min_bound = np.array([-math.inf,-math.inf,0.1])
+        max_bound = np.array([math.inf,-0.1, 0.7])
+        inlier_indices = np.all((min_bound <= point_cloud.points) & (point_cloud.points <= max_bound), axis=1)
+        cropped_point_cloud = point_cloud.select_by_index(np.where(inlier_indices)[0].tolist())
+        
+        # Remove statistical outliers
+        cl, ind = cropped_point_cloud.remove_statistical_outlier(nb_neighbors=100, std_ratio=0.1) 
+        filtered_pc = cropped_point_cloud.select_by_index(ind)
+        #Perform clustering
+        clust = clusterObjManich(filtered_pc, 0.03)
+        
+        #Create a pyvista cloud of the clustered acquired points
+        clustered_cloud = o3d.geometry.PointCloud()
+        clustered_cloud.points = o3d.utility.Vector3dVector(clust)
+        pyvista_cloud = pv.PolyData(np.asarray(clustered_cloud.points))
+        pyvista_cloud.plot(point_size=1, color="red")
+        
+        #Apply transform to the pointcloud to get the position of the points from the depth frame to the World frame
+        T_depth_to_world = hl2ss_3dcv.camera_to_rignode(calibration.extrinsics) @ hl2ss_3dcv.reference_to_world(data.pose)
+        points_patient_depth = np.asarray(clustered_cloud.points)
+        points_patient_world = hl2ss_3dcv.transform(points_patient_depth, T_depth_to_world)
+        pyvista_transformed = pv.PolyData(points_patient_world)
+        pyvista_transformed.plot(point_size=1, color="red")
+        points_patient_world = points_patient_world.T
+    
+        
+        #Upload the reference mesh for the registration (.obj)
+        mesh = o3d.io.read_triangle_mesh("C:/Users/Alessandro/Desktop/Neuro/face_3t_mWtextr.obj")
+        filtered_pca = hiddenPointRemoval(mesh)
+        vertices = np.array(filtered_pca.points)  # Transpose for a 3xN matrix
+        reduction_factor = 0.5 # Adjust as needed
+        downsampled_points = vertices[np.random.choice(vertices.shape[0], int(reduction_factor * vertices.shape[0]), replace=False)] #downsample the pointcloud if it is too heavy
+        points_patient_CT = downsampled_points.T
+        
+        #Perform PCA registration and get Tworld_CT
+        R_pca,t_pca,T_pca = PCA_registration(points_patient_world,points_patient_CT)
+        registered_pca = R_pca @ points_patient_world + t_pca
+        
+        #Create a o3d pointcloud of the "source" pointcloud (patient's point World)
+        plotter = pv.Plotter()
+        source_cloud = o3d.geometry.PointCloud()
+        source_cloud.points = o3d.utility.Vector3dVector(points_patient_world.T)  # Transpose for correct shape
+        
+        #Create a o3d pointcloud of the "source" pointcloud (patient's point CT)
+        target_cloud = o3d.geometry.PointCloud()
+        target_cloud.points = o3d.utility.Vector3dVector(points_patient_CT.T)
+        target_cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+        
+        result = o3d.pipelines.registration.registration_icp(
+            source_cloud, target_cloud,  # Source and target point clouds
+            1,  # Maximum correspondence distance (increase if points are far apart)
+            T_pca,  # Initial transformation guess
+            o3d.pipelines.registration.TransformationEstimationPointToPlane(),  # Point-to-point ICP
+            o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100000)  # Max iterations
+        )
+        refined_transform = result.transformation #perform icp refined registration using the output from PCA registration as initial guess
 
-                print(f"Server listening on {HOST}:{PORT}")
+        icp_regist = source_cloud.transform(refined_transform)#Apply the computed trasnfrom to the "source" pointcloud
 
-                while True:
+        # Compute the RMSE
+        evaluation = o3d.pipelines.registration.evaluate_registration(
+            icp_regist, target_cloud,
+            max_correspondence_distance=0.01  # Adjust as needed
+        )
 
-                    client_socket, client_address = server_socket.accept()
-                    print(f"Accepted connection from {client_address}")
-                    
-                    '''
-                    data = client.get_next_packet()
-                    data_depth = hl2ss_3dcv.rm_depth_undistort(data.payload.depth,calibration.undistort_map)
-                    data_IR = hl2ss_3dcv.rm_depth_undistort(data.payload.ab,calibration.undistort_map)
-                    
-                    #cv2.imshow("AB" , data.payload.depth/ np.max(data.payload.depth)) # Scaled for visibility
-                    #depth_normal = hl2ss_3dcv.rm_depth_normalize(data.payload.ab, calibration.scale)
-                    #depth_undistort = hl2ss_3dcv.rm_depth_undistort(depth_normal,calibration.undistort_map)
-                    #points = Compute_3D_coord(data)
-                    cv2.imshow('AB', data.payload.ab / np.max(data.payload.ab))
-                    
-                    Blob_detector(data_IR,data_depth,detector)
-                    
-                    cv2.waitKey(1)
-                    '''
-                    sink_depth.acquire()
-                    _, data = sink_depth.get_most_recent_frame()
+        rmse_icp = evaluation.inlier_rmse
+        print("RMSE_icp:", rmse_icp)
 
-                    depth = hl2ss_3dcv.rm_depth_undistort(data.payload.depth, calibration.undistort_map)
-                    depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
-                    
-                    
-                    #data = hl2ss_3dcv.rm_depth_undistort(data,calibration.undistort_map)
-                    o3d_depth_image = o3d.geometry.Image(depth)
-                    
-                    intrinsic = o3d.camera.PinholeCameraIntrinsic()
-                    intrinsic.set_intrinsics(hl2ss.Parameters_RM_DEPTH_LONGTHROW.WIDTH, hl2ss.Parameters_RM_DEPTH_LONGTHROW.HEIGHT, calibration.intrinsics[0, 0], calibration.intrinsics[1, 1], calibration.intrinsics[2, 0], calibration.intrinsics[2, 1])
-                    
-                    # Create a point cloud from the depth image
-                    point_cloud = o3d.geometry.PointCloud.create_from_depth_image(
-                        o3d_depth_image,
-                        intrinsic,
-                        depth_scale=1.0,  # Adjust based on your specific depth values
-                        #depth_trunc=0.5,  # Adjust based on your specific depth values
-                    )
+         
+        icp_regist = pv.PolyData(np.asarray(icp_regist.points))
+        cloud_target = pv.PolyData(points_patient_CT.T)
+        
+        #plot the result and the target pointcloud
+        plotter.add_mesh(icp_regist, color="blue", point_size=5)
+        #plotter.add_mesh(cloud_registered, color="red", point_size=5)
+        plotter.add_mesh(cloud_target, color="green", point_size=5)
+        plotter.show()
+        
+        #uncomment this to send the Transform to holo
+        '''
+        T_CT_to_world = np.linalg.inv(refined_transform)
 
-                    min_bound = np.array([-math.inf,-math.inf,0.1])
-                    max_bound = np.array([math.inf,-0.1, 0.7])
-                    
-                    inlier_indices = np.all((min_bound <= point_cloud.points) & (point_cloud.points <= max_bound), axis=1)
-                    cropped_point_cloud = point_cloud.select_by_index(np.where(inlier_indices)[0].tolist())
-                    
-                    # Remove statistical outliers
-                    cl, ind = cropped_point_cloud.remove_statistical_outlier(nb_neighbors=100, std_ratio=0.1) 
-                    filtered_pc = cropped_point_cloud.select_by_index(ind)
-                    #filtered_pc = filtered_pc.voxel_down_sample(voxel_size=0.001)
-                    clust = clusterObjManich(filtered_pc, 0.03)
-                    #cropped_point_cloud.estimate_normals()
-                    #mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(cropped_point_cloud)
+        matrixString = '\n'.join([','.join(map(str, row)) for row in T_CT_to_world ])
+        print(matrixString)
 
-                    #o3d.io.write_triangle_mesh("C:/Users/Alessandro/Desktop/Neuro/pcl_holo.obj", mesh)
-                    
-                    clustered_cloud = o3d.geometry.PointCloud()
-                    clustered_cloud.points = o3d.utility.Vector3dVector(clust)
-                    #o3d.io.write_point_cloud("C:/Users/Alessandro/Desktop/Neuro/pcl_holo.ply",clustered_cloud)
-                    
-                    pyvista_cloud = pv.PolyData(np.asarray(clustered_cloud.points))
-                    pyvista_cloud.plot(point_size=1, color="red")
-                    
-
-                    T_depth_to_world = hl2ss_3dcv.camera_to_rignode(calibration.extrinsics) @ hl2ss_3dcv.reference_to_world(data.pose)
-                    points_patient_depth = np.asarray(clustered_cloud.points)
-                    points_patient_world = hl2ss_3dcv.transform(points_patient_depth, T_depth_to_world)
-                    pyvista_transformed = pv.PolyData(points_patient_world)
-                    pyvista_transformed.plot(point_size=1, color="red")
-                    
-                    points_patient_world = points_patient_world.T
-                    print(points_patient_world.shape)
-                    
-
-                    mesh = o3d.io.read_triangle_mesh("C:/Users/Alessandro/Desktop/Neuro/face_3t_mWtextr.obj")
-                    filtered_pca = hiddenPointRemoval(mesh)
-                    vertices = np.array(filtered_pca.points)  # Transpose for a 3xN matrix
-                    reduction_factor = 0.5 # Adjust as needed
-                    downsampled_points = vertices[np.random.choice(vertices.shape[0], int(reduction_factor * vertices.shape[0]), replace=False)]
-                    points_patient_CT = downsampled_points.T
-                    print(points_patient_CT.shape)
-
-                    R_pca,t_pca,T_pca = PCA_registration(points_patient_world,points_patient_CT)
-                    registered_pca = R_pca @ points_patient_world + t_pca
-
-                    plotter = pv.Plotter()
-
-                    source_cloud = o3d.geometry.PointCloud()
-                    source_cloud.points = o3d.utility.Vector3dVector(points_patient_world.T)  # Transpose for correct shape
-
-                    target_cloud = o3d.geometry.PointCloud()
-                    target_cloud.points = o3d.utility.Vector3dVector(points_patient_CT.T)
-                    target_cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
-
-                    result = o3d.pipelines.registration.registration_icp(
-                        source_cloud, target_cloud,  # Source and target point clouds
-                        1,  # Maximum correspondence distance (increase if points are far apart)
-                        T_pca,  # Initial transformation guess
-                        o3d.pipelines.registration.TransformationEstimationPointToPlane(),  # Point-to-point ICP
-                        o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100000)  # Max iterations
-                    )
-
-                    refined_transform = result.transformation
-
-                    icp_regist = source_cloud.transform(refined_transform)
-
-                    # Compute the RMSE
-                    evaluation = o3d.pipelines.registration.evaluate_registration(
-                        icp_regist, target_cloud,
-                        max_correspondence_distance=0.01  # Adjust as needed
-                    )
-
-                    rmse_icp = evaluation.inlier_rmse
-                    print("RMSE_icp:", rmse_icp)
-
-
-                    icp_regist = pv.PolyData(np.asarray(icp_regist.points))
-                    cloud_target = pv.PolyData(points_patient_CT.T)
-
-                    plotter.add_mesh(icp_regist, color="blue", point_size=5)
-                    #plotter.add_mesh(cloud_registered, color="red", point_size=5)
-                    plotter.add_mesh(cloud_target, color="green", point_size=5)
-                    plotter.show()
-                    
-                    
-                    T_CT_to_world = np.linalg.inv(refined_transform)
-
-                    matrixString = '\n'.join([','.join(map(str, row)) for row in T_CT_to_world ])
-                    print(matrixString)
-
-                    
-                    with client_socket:
-                        client_socket.sendall(matrixString.encode("UTF-8"))
-                        print("Matrix sent to client")
-                        
-                    client_socket.close()
-                    break
-                    
+        
+        with client_socket:
+            client_socket.sendall(matrixString.encode("UTF-8"))
+            print("Matrix sent to client")
+            
+        client_socket.close()
+        break
+        '''          
                     
 
                 

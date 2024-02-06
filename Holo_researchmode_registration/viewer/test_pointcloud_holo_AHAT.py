@@ -49,7 +49,7 @@ profile_ab = hl2ss.VideoProfile.H265_MAIN
 # Buffer length in seconds
 buffer_length = 5
 
-calibration_path = 'C:/Users/Alessandro/Desktop/Neuro'
+calibration_path = 'C:/Users/Alessandro/Desktop/Registration_material/Holo_researchmode_registration'
 
 #------------------------------------------------------------------------------
 if __name__ == '__main__':
