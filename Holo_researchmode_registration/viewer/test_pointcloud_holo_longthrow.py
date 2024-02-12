@@ -50,7 +50,8 @@ profile_ab = hl2ss.VideoProfile.H265_MAIN
 # Buffer length in seconds
 buffer_length = 5
 
-calibration_path = r"C:\Users\Veronica\Desktop\PhD\VRClient\HoloPCDRegistration\Registration_material"
+calibration_path = r"C:\Users\Alessandro\Desktop\Registration_material"
+
 
 #------------------------------------------------------------------------------
 if __name__ == '__main__':
@@ -270,10 +271,8 @@ if __name__ == '__main__':
         
         #undistort and normalize the pointcloud
         depth = hl2ss_3dcv.rm_depth_undistort(data.payload.depth, calibration.undistort_map)
-        depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
+        #depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
 
-        
-        
         o3d_depth_image = o3d.geometry.Image(depth)
         
         intrinsic = o3d.camera.PinholeCameraIntrinsic()
@@ -306,38 +305,36 @@ if __name__ == '__main__':
         clustered_cloud = o3d.geometry.PointCloud()
         clustered_cloud.points = o3d.utility.Vector3dVector(clust)
         pyvista_cloud = pv.PolyData(np.asarray(clustered_cloud.points))
-        # pyvista_cloud.plot(point_size=1, color="red")
 
         #Apply transform to the pointcloud to get the position of the points from the depth frame to the World frame
         T_depth_to_world = hl2ss_3dcv.camera_to_rignode(calibration.extrinsics) @ hl2ss_3dcv.reference_to_world(data.pose)
         points_patient_depth = np.asarray(clustered_cloud.points)
         points_patient_world = hl2ss_3dcv.transform(points_patient_depth, T_depth_to_world)
         pyvista_transformed = pv.PolyData(points_patient_world)
-        # pyvista_transformed.plot(point_size=1, color="red")
         points_patient_world = points_patient_world.T
     
         
         #Upload the reference mesh for the registration (.obj)
-        mesh = o3d.io.read_triangle_mesh(r"C:\Users\Veronica\Desktop\PhD\EP\Dati\DAVIDEP\3Dmodels\2\EDITED_remeshed.obj") #TODO: put mesh path
+        mesh = o3d.io.read_triangle_mesh(r"C:\Users\Alessandro\Desktop\Registration_material\Acquisitions\EP_3DModels\EDITED_remeshed.obj")
         filtered_pca = hiddenPointRemoval(mesh)
         vertices = np.array(filtered_pca.points)  # Transpose for a 3xN matrix
-        vertices = vertices / 1000
+        #vertices = vertices / 1000
         reduction_factor = 0.5 # Adjust as needed #TODO: set reduction factor
         downsampled_points = vertices[np.random.choice(vertices.shape[0], int(reduction_factor * vertices.shape[0]), replace=False)] #downsample the pointcloud if it is too heavy
         points_patient_CT = downsampled_points.T
         
         #Perform PCA registration and get Tworld_CT
-        # R_pca,t_pca,T_pca = PCA_registration(points_patient_world,points_patient_CT)
-        # registered_pca = R_pca @ points_patient_world + t_pca
+        R_pca,t_pca,T_pca = PCA_registration(points_patient_world,points_patient_CT)
+        #registered_pca = R_pca @ points_patient_world + t_pca
         
         #Create a o3d pointcloud of the "source" pointcloud (patient's point World)
         plotter = pv.Plotter()
         source_cloud = o3d.geometry.PointCloud()
         source_cloud.points = o3d.utility.Vector3dVector(points_patient_world.T)  # Transpose for correct shape
-        o3d.io.write_point_cloud(os.path.join(r"C:\Users\Veronica\Desktop\PhD\EP\Dati\DAVIDEP\pcd", f"pcd_{ITERATION}.ply"), source_cloud)
+        #o3d.io.write_point_cloud(os.path.join(r"C:\Users\Veronica\Desktop\PhD\EP\Dati\DAVIDEP\pcd", f"pcd_{ITERATION}.ply"), source_cloud)
 
-        """
-        #Create a o3d pointcloud of the "source" pointcloud (patient's point CT)
+        
+        #Create a o3d pointcloud of the "target" pointcloud (patient's point CT)
         target_cloud = o3d.geometry.PointCloud()
         target_cloud.points = o3d.utility.Vector3dVector(points_patient_CT.T)
         target_cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
@@ -356,7 +353,7 @@ if __name__ == '__main__':
         # Compute the RMSE
         evaluation = o3d.pipelines.registration.evaluate_registration(
             icp_regist, target_cloud,
-            max_correspondence_distance=0.01  # Adjust as needed
+            max_correspondence_distance=1  # Adjust as needed
         )
 
         rmse_icp = evaluation.inlier_rmse
@@ -371,7 +368,7 @@ if __name__ == '__main__':
         #plotter.add_mesh(cloud_registered, color="red", point_size=5)
         plotter.add_mesh(cloud_target, color="green", point_size=5)
         plotter.show()
-        """
+
         #uncomment this to send the Transform to holo
         '''
         T_CT_to_world = np.linalg.inv(refined_transform)
