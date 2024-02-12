@@ -431,7 +431,7 @@ if __name__ == '__main__':
     tracker = Tracker(60, 5, 3, 4)
 
     while True:
-            HOST = "192.168.0.101"
+            HOST = "192.168.0.126"
             PORT = 1000
 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
