@@ -248,7 +248,7 @@ if __name__ == '__main__':
     
     #This while is used if i want to enstablish a communication protocol between Holo and workstation. I comment this for the moment
     while True:
-            HOST = "192.168.0.103"
+            HOST = "192.168.0.104"
             PORT = 1000
 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
@@ -269,7 +269,7 @@ if __name__ == '__main__':
                 
                 #undistort and normalize the pointcloud
                 depth = hl2ss_3dcv.rm_depth_undistort(data.payload.depth, calibration.undistort_map)
-                #depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
+                depth = hl2ss_3dcv.rm_depth_normalize(depth, scale)
 
                 o3d_depth_image = o3d.geometry.Image(depth)
                 
@@ -280,7 +280,7 @@ if __name__ == '__main__':
                 point_cloud = o3d.geometry.PointCloud.create_from_depth_image(
                     o3d_depth_image,
                     intrinsic,
-                    depth_scale=1000.0,  # Adjust based on your specific depth values
+                    depth_scale=1.0,  # Adjust based on your specific depth values
                     #depth_trunc=0.5,  # Adjust based on your specific depth values
                 )
                 
