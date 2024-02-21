@@ -17,6 +17,7 @@ import pyvista as pv
 import keyboard
 import multiprocessing as mp
 import copy
+import struct
 
 
 #Function to perform PCA initial registration
@@ -110,65 +111,95 @@ def PCA_registration(points_U,points_Y):
 
 
 
-pointcloud_torso = open3d.io.read_point_cloud('pcd_10.ply')
 
-mesh = o3d.io.read_triangle_mesh(r"C:\Users\Alessandro\Desktop\Registration_material\Acquisitions\EP_3DModels\EDITED_remeshed.obj")
-vertices = np.array(mesh.vertices)  # Transpose for a 3xN matrix
-vertices = vertices / 1000
-reduction_factor = 0.5 # Adjust as needed #TODO: set reduction factor
-downsampled_points = vertices[np.random.choice(vertices.shape[0], int(reduction_factor * vertices.shape[0]), replace=False)] #downsample the pointcloud if it is too heavy
-points_phantom = downsampled_points
-print(points_phantom.shape)
+phantom = pv.read(r"C:\Users\Alessandro\Desktop\DAVIDTrials\data\3DModels\UNITY\skin_UNITY_two_layers.obj")
 
+list_points = []
+list_actors = []
+surf = pv.PolyData()
 
-min_bound = np.array([-math.inf, -math.inf,  -math.inf])
-max_bound = np.array([math.inf, math.inf, math.inf])
-inlier_indices = np.all((min_bound <= pointcloud_torso.points) & (pointcloud_torso.points <= max_bound), axis=1)
-cropped_point_cloud = pointcloud_torso.select_by_index(np.where(inlier_indices)[0].tolist())
-cropped_point_cloud = np.asarray(cropped_point_cloud.points)
-print(cropped_point_cloud.shape)
+def put_control_points(pos):
+    
+        sphere = pv.Sphere(radius=1, center=pos)
+        control_point=p.add_mesh(sphere, color="red", opacity=0.8)
+        list_points.append(pos)
+        list_actors.append(control_point)
 
 
-R_pca,t_pca,T_pca = PCA_registration(cropped_point_cloud.T,points_phantom.T)
+
+def remove_control_points():
+    p.remove_actor(list_actors[-1])
+    list_actors.pop()
+    list_points.pop()
+    p.render()
+
+def reconstruct_surface():
+    cloud = pv.PolyData(np.asarray(list_points))
+    surf = cloud.delaunay_2d()
+    
+    print(np.asarray(surf))
+    p.add_mesh(surf,show_edges=True)
+    p.render()
+
+    return surf
+
+# Tracks right clicks
+
+axes = pv.Axes(show_actor=True, actor_scale=40.0, line_width=5)
+reference_frame = np.asarray([0,0,0])
+axes.origin = (0,0,0)
+p = pv.Plotter(notebook=0)
+p.add_mesh(phantom,opacity=0.3)
+p.add_actor(axes.actor)
+p.enable_surface_point_picking(put_control_points)
+p.add_key_event('c',remove_control_points)
+p.show()
+
+surf = reconstruct_surface()
+
+p = pv.Plotter(notebook=0)
+p.add_mesh(phantom,opacity=0.3)
+p.add_mesh(surf,opacity=0.3,color='red')
+p.show()
+
+print(surf.faces)
+print(surf.points)
 
 
- #Create a o3d pointcloud of the "source" pointcloud (patient's point CT)
-source_cloud = o3d.geometry.PointCloud()
-source_cloud.points = o3d.utility.Vector3dVector(cropped_point_cloud)
+triangles = [value for index, value in enumerate(surf.faces.tolist()) if index % 4 != 0]
 
-target_cloud = o3d.geometry.PointCloud()
-target_cloud.points = o3d.utility.Vector3dVector(points_phantom)
-target_cloud.estimate_normals(search_param=o3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
 
-result = o3d.pipelines.registration.registration_icp(
-    source_cloud, target_cloud,  # Source and target point clouds
-    1,  # Maximum correspondence distance (increase if points are far apart)
-    T_pca,  # Initial transformation guess
-    o3d.pipelines.registration.TransformationEstimationPointToPlane(),  # Point-to-point ICP
-    o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=100000)  # Max iterations
-)
-refined_transform = result.transformation #perform icp refined registration using the output from PCA registration as initial guess
+points = [
+    x
+    for row in surf.points.tolist()
+    for x in row
+]
 
-icp_regist = source_cloud.transform(refined_transform)#Apply the computed trasnfrom to the "source" pointcloud
 
-# Compute the RMSE
-evaluation = o3d.pipelines.registration.evaluate_registration(
-    icp_regist, target_cloud,
-    max_correspondence_distance=1  # Adjust as needed
-)
 
-rmse_icp = evaluation.inlier_rmse
-print("RMSE_icp:", rmse_icp)
-       
 
-#pc_torso = pv.PolyData(np.asarray(pointcloud_torso.points))
-pc_cropped_torso = pv.PolyData(np.asarray(cropped_point_cloud))
-pc_phantom = pv.PolyData(points_phantom)
-phantom_registered = pv.PolyData(np.asarray(icp_regist.points))
+while True:
+        HOST = "192.168.0.103"
+        PORT = 2000
 
-plotter = pv.Plotter()
-plotter.add_mesh(phantom_registered,color='green')
-plotter.add_mesh(pc_cropped_torso,color='red')
-plotter.add_mesh(pc_phantom,color='blue')
-plotter.add_axes_at_origin()
-plotter.show()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
+                server_socket.bind((HOST, PORT))
+                server_socket.listen()
+
+                print(f"Server listening on {HOST}:{PORT}")
+
+                client_socket, client_address = server_socket.accept()
+                print(f"Accepted connection from {client_address}")
+          
+
+        while True:
+            
+            data = {'faces': triangles,'points': points}
+            print(data)
+            
+            with client_socket:
+                client_socket.sendall(json.dumps(data).encode("UTF-8"))
+                
+                
+            client_socket.close()
+            break
